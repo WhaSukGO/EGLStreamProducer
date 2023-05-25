@@ -3,7 +3,7 @@
 #include <string.h>
 #include <cuda_runtime.h>
 
-#include "eglstreamproducer.h"
+#include "eglstreamproducer.hpp"
 #include "EGLAPIAccessors.hpp"
 
 EGLStreamProducer::EGLStreamProducer(int fifoLength, int latency, int width, int height)
