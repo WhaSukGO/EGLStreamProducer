@@ -4,7 +4,7 @@
 #include <iostream>
 #include <cuda_runtime.h>
 
-#include "eglstreamConsumer.hpp"
+#include "EGLStreamConsumer.hpp"
 #include "EGLAPIAccessors.hpp"
 
 EGLStreamConsumer::EGLStreamConsumer() : cudaConnection(NULL), m_stream(NULL), m_resource(0)

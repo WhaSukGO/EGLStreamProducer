@@ -12,8 +12,8 @@ LDFLAGS += \
 
 SRCS := \
 	main.cpp \
-	eglstreamproducer.cpp \
-	eglstreamConsumer.cpp \
+	EGLStreamProducer.cpp \
+	EGLStreamConsumer.cpp \
 	EGLAPIAccessors.cpp
 
 main:

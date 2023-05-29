@@ -9,8 +9,8 @@
 
 #include <gst/gst.h>
 #include <cuda_runtime.h>
-#include "eglstreamConsumer.hpp"
-#include "eglstreamproducer.hpp"
+#include "EGLStreamConsumer.hpp"
+#include "EGLStreamProducer.hpp"
 
 static const int FrameWidth = 800;
 static const int FrameHeight = 600;
