@@ -10,11 +10,9 @@
 #include <npp.h>
 #include <nppi_color_conversion.h>
 
-// #include <opencv4/
-// #include <opencv4/core/cuda.hpp>
 #include "opencv2/highgui.hpp"
 #include "opencv2/core/cuda.hpp"
-#include <opencv2/cudaimgproc.hpp>
+#include "opencv2/cudaimgproc.hpp"
 
 EGLStreamConsumer::EGLStreamConsumer(int fifoLength, int latency, int width, int height) : cudaConnection(NULL), m_stream(NULL), m_resource(0)
 {
@@ -22,6 +20,10 @@ EGLStreamConsumer::EGLStreamConsumer(int fifoLength, int latency, int width, int
     stream = EGL_NO_STREAM_KHR;
 
     this->fifoLength = fifoLength;
+    this->latency = latency;
+    this->width = width;
+    this->height = height;
+
     if (fifoLength > 0)
     {
         fifoMode = true;
@@ -30,9 +32,6 @@ EGLStreamConsumer::EGLStreamConsumer(int fifoLength, int latency, int width, int
     {
         fifoMode = false;
     }
-    this->latency = latency;
-    this->width = width;
-    this->height = height;
 
     if (!initEGLDisplay())
     {
