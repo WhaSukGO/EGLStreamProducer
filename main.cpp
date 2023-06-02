@@ -1,132 +1,55 @@
-#include <thread>
 #include <stdio.h>
-#include <string.h>
-#include <assert.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <iostream>
-
 
 #include <gst/gst.h>
 #include <cuda_runtime.h>
+#include "opencv2/highgui.hpp"
+
 #include "EGLStreamConsumer.hpp"
-#include "EGLStreamProducer.hpp"
 
-static const int FrameWidth = 800;
-static const int FrameHeight = 600;
 
-static EGLStreamProducer *eglStreamProducer = nullptr;
-
-void producerThreadFunc()
+static void onDemuxPadAdded(GstElement *src, GstPad *pad, GstElement *dst)
 {
-    if (cudaFree(nullptr) != cudaSuccess)
+    GstPad *sink_pad = gst_element_get_static_pad(dst, "sink");
+    GstPadLinkReturn ret;
+    GstCaps *new_pad_caps = NULL;
+    GstStructure *new_pad_struct = NULL;
+    const gchar *new_pad_type = NULL;
+
+    /* If our converter is already linked, we have nothing to do here */
+    if (gst_pad_is_linked(sink_pad))
     {
-        printf("Failed to initialize CUDA context.\n");
-        return;
+        g_print("We are already linked. Ignoring.\n");
+        goto exit;
     }
 
-    CUdeviceptr buffer;
-    CUresult ret = cuMemAlloc(&buffer, FrameWidth * FrameHeight * 3 / 2);
-    if (ret != CUDA_SUCCESS)
+    /* Check the new pad's type */
+    new_pad_caps = gst_pad_get_current_caps(pad);
+    new_pad_struct = gst_caps_get_structure(new_pad_caps, 0);
+    new_pad_type = gst_structure_get_name(new_pad_struct);
+    if (!g_str_has_prefix(new_pad_type, "video/x-h265"))
     {
-        g_print("cuMemAlloc failed: %d\n.", ret);
-        return;
+        g_print("It has type '%s' which is not raw audio. Ignoring.\n", new_pad_type);
+        goto exit;
     }
 
-    int cnt = 0;
-    while (cnt < 50)
+    /* Attempt the link */
+    ret = gst_pad_link(pad, sink_pad);
+    if (GST_PAD_LINK_FAILED(ret))
     {
-        std::this_thread::sleep_for(std::chrono::milliseconds(40));
-
-        cnt++;
-        g_print("Present a new frame %d.\n", cnt);
-        // call cuEGLStreamProducerReturnFrame to get the returned frame from EGL stream,
-        // and then call cuEGLStreamProducerPresentFrame to push the frame back to the EGL stream FIFO.
-        eglStreamProducer->presentFrame(buffer);
+        g_print("Type is '%s' but link failed.\n", new_pad_type);
+    }
+    else
+    {
+        g_print("Link succeeded (type '%s').\n", new_pad_type);
     }
 
-    cuMemFree(buffer);
-}
+exit:
+    /* Unreference the new pad's caps, if we got them */
+    if (new_pad_caps != NULL)
+        gst_caps_unref(new_pad_caps);
 
-int runEGLProducer()
-{
-    gst_init(nullptr, nullptr);
-
-    GstElement *pipeline = gst_pipeline_new("play");
-    if (pipeline == nullptr)
-    {
-        g_print("Create pipeline failed.\n");
-        return -1;
-    }
-
-    GstElement *source = gst_element_factory_make("nveglstreamsrc", nullptr);
-    if (source == nullptr)
-    {
-        g_print("Create eglstream source failed.\n");
-        return -1;
-    }
-
-    eglStreamProducer = new EGLStreamProducer(4, 0, FrameWidth, FrameHeight);
-    g_object_set(source, "display", eglStreamProducer->getEGLDisplay(), nullptr);
-    g_object_set(source, "eglstream", eglStreamProducer->getEGLStream(), nullptr);
-
-    GstElement *capFilter = gst_element_factory_make("capsfilter", nullptr);
-    if (capFilter == nullptr)
-    {
-        g_print("Create capsfilter failed.\n");
-        return -1;
-    }
-
-    GstCaps *caps = gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, "NV12",
-                                        "width", G_TYPE_INT, FrameWidth,
-                                        "height", G_TYPE_INT, FrameHeight,
-                                        "framerate", GST_TYPE_FRACTION, 25, 1, NULL);
-
-    GstCapsFeatures *feature = gst_caps_features_new("memory:NVMM", NULL);
-    gst_caps_set_features(caps, 0, feature);
-
-    /* Set capture caps on capture filter */
-    g_object_set(capFilter, "caps", caps, NULL);
-    gst_caps_unref(caps);
-
-    GstElement *sink = gst_element_factory_make("fakesink", nullptr);
-    if (sink == nullptr)
-    {
-        g_print("Create overlay sink failed.\n");
-        return -1;
-    }
-
-    gst_bin_add_many(GST_BIN(pipeline), source, capFilter, sink, nullptr);
-    if (!gst_element_link_many(source, capFilter, sink, nullptr))
-    {
-        g_print("Link elememt eglstream source <-> overlay sink failed.\n");
-        return -1;
-    }
-
-    GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
-    if (ret == GST_STATE_CHANGE_FAILURE)
-    {
-        g_print("Change pipeline state to %s failed.\n", gst_element_state_get_name(GST_STATE_PLAYING));
-        return -1;
-    }
-
-    if (!eglStreamProducer->connectEGLProducer())
-    {
-        g_print("Connect EGL stream cuda producer failed.\n");
-        return -1;
-    }
-
-    // Firstly, call cuEGLStreamProducerPresentFrame to push 4 frame buffers to the EGL stream FIFO.
-    eglStreamProducer->presentFrameBuffers(4);
-
-    // start the cuda producer
-    std::thread t = std::thread(producerThreadFunc);
-
-    t.join();
-    gst_element_set_state(pipeline, GST_STATE_NULL);
-    gst_object_unref(pipeline);
-    delete eglStreamProducer;
-    return 0;
+    /* Unreference the sink pad */
+    gst_object_unref(sink_pad);
 }
 
 int runEGLConsumer()
@@ -136,169 +59,86 @@ int runEGLConsumer()
 
     gst_init(nullptr, nullptr);
 
+    EGLStreamConsumer *eglStreamConsumer = new EGLStreamConsumer(4, 0, width, height);
+
     GstElement *pipeline = gst_pipeline_new("play");
-    if (pipeline == nullptr)
-    {
-        g_print("Create pipeline failed.\n");
-        return -1;
-    }
-
     GstElement *source = gst_element_factory_make("filesrc", nullptr);
-    if (source == nullptr)
-    {
-        g_print("[GStreamer] Create source failed.\n");
-        return -1;
-    }
-
     GstElement *matroskademux = gst_element_factory_make("matroskademux", nullptr);
-    if (matroskademux == nullptr)
-    {
-        g_print("[GStreamer] Create matroskademux failed.\n");
-        return -1;
-    }
-
     GstElement *queue = gst_element_factory_make("queue", nullptr);
-    if (queue == nullptr)
-    {
-        g_print("[GStreamer] Create queue failed.\n");
-        return -1;
-    }
-
     GstElement *h265parse = gst_element_factory_make("h265parse", nullptr);
-    if (h265parse == nullptr)
-    {
-        g_print("[GStreamer] Create h265parse failed.\n");
-        return -1;
-    }
-
     GstElement *nvv4l2decoder = gst_element_factory_make("nvv4l2decoder", nullptr);
-    if (nvv4l2decoder == nullptr)
-    {
-        g_print("[GStreamer] Create nvv4l2decoder failed.\n");
-        return -1;
-    }
-
     GstElement *nvvidconv = gst_element_factory_make("nvvidconv", nullptr);
-    if (nvvidconv == nullptr)
-    {
-        g_print("[GStreamer] Create nvvidconv failed.\n");
-        return -1;
-    }
-
     GstElement *nvvideosink = gst_element_factory_make("nvvideosink", nullptr);
-    // GstElement *nvvideosink = gst_element_factory_make("fakesink", nullptr);
-    if (nvvideosink == nullptr)
+
+    if (!pipeline || !source || !matroskademux || !queue || !h265parse || !nvv4l2decoder || !nvvidconv || !nvvideosink)
     {
-        g_print("[GStreamer] Create nvvideosink failed.\n");
+        g_print("Failed to create elements\n");
         return -1;
     }
 
-    GstElement *capFilter = gst_element_factory_make("capsfilter", nullptr);
-    if (capFilter == nullptr)
+    g_object_set(source, "location", "/home/nano1/Development/2023/proj/1.mkv", nullptr);
+    g_object_set(nvv4l2decoder, "output-buffers", 4, nullptr);
+    g_object_set(nvvideosink, "display", eglStreamConsumer->getEGLDisplay(), nullptr);
+    g_object_set(nvvideosink, "stream", eglStreamConsumer->getEGLStream(), nullptr);
+    g_object_set(nvvideosink, "fifo", true, nullptr);
+    g_object_set(nvvideosink, "fifo-size", 4, nullptr);
+
+    g_signal_connect(matroskademux, "pad-added", G_CALLBACK(&onDemuxPadAdded), queue);
+
+    gst_bin_add_many(GST_BIN(pipeline), source, matroskademux, queue, h265parse, nvv4l2decoder, nvvidconv, nvvideosink, nullptr);
+
+    if (!gst_element_link(source, matroskademux))
     {
-        g_print("Create capsfilter failed.\n");
+        g_print("source -> demux failed.\n");
         return -1;
     }
 
-    GstCaps *caps = gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, "NV12",
-                                        "width", G_TYPE_INT, width,
-                                        "height", G_TYPE_INT, height,
-                                        "framerate", GST_TYPE_FRACTION, 30, 1, NULL);
-
-    GstCapsFeatures *feature = gst_caps_features_new("memory:NVMM", NULL);
-    gst_caps_set_features(caps, 0, feature);
-
-    /* Set capture caps on capture filter */
-    g_object_set(capFilter, "caps", caps, NULL);
-    gst_caps_unref(caps);
-
-    gst_bin_add_many(GST_BIN(pipeline), source, matroskademux, queue, h265parse, nvv4l2decoder, nvvidconv, capFilter, nvvideosink, nullptr);
-    if (!gst_element_link_many(nvvidconv, capFilter, nvvideosink, nullptr))
+    if (!gst_element_link_many(queue, h265parse, nvv4l2decoder, nvvidconv, nvvideosink, nullptr))
     {
-        g_print("Link elememt eglstream source <-> overlay sink failed.\n");
+        g_print("queue -> sink failed.\n");
         return -1;
     }
 
-    EGLStreamConsumer *eglStreamConsumer = new EGLStreamConsumer();
-    EGLStreamKHR *stream = nullptr;
-    g_object_get(nvvideosink, "stream", stream, NULL);
+    GstState state, pending;
+    GstStateChangeReturn ret;
 
-    std::cout << stream << std::endl;
-    if (!eglStreamConsumer->connectEGLProducer(stream))
-        std::cout << "Failed" << std::endl;
-
-    if (!eglStreamConsumer->acquireFrame())
-        std::cout << "Failed" << std::endl;
-
-    // g_object_get(source, "stream", eglStreamProducer->getEGLDisplay(), nullptr);
-
-
-
-    GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
+    ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE)
     {
         g_print("Change pipeline state to %s failed.\n", gst_element_state_get_name(GST_STATE_PLAYING));
         return -1;
     }
 
-    sleep(10);
+    for (;;)
+    {
+        ret = gst_element_get_state(pipeline, &state, &pending, 0);
+        if (ret == GST_STATE_CHANGE_SUCCESS && state == GST_STATE_PLAYING)
+        {
+            printf("Ready to retrieve frame\n");
+            break;
+        }
+    }
 
+    cv::Mat cpuMat(cv::Size(width, height), CV_8UC3);
 
-    // eglStreamProducer = new EGLStreamProducer(4, 0, FrameWidth, FrameHeight);
-    // g_object_set(source, "display", eglStreamProducer->getEGLDisplay(), nullptr);
-    // g_object_set(source, "eglstream", eglStreamProducer->getEGLStream(), nullptr);
+    for (int idx = 0;; idx++)
+    {
+        printf("%dth frame retrieved\n", idx);
 
-    // GstElement *capFilter = gst_element_factory_make("capsfilter", nullptr);
-    // if (capFilter == nullptr) {
-    //     g_print("Create capsfilter failed.\n");
-    //     return -1;
-    // }
+        cv::cuda::GpuMat gpuMat = eglStreamConsumer->acquireFrame();
 
-    // GstCaps *caps = gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, "NV12",
-    //                                     "width", G_TYPE_INT, FrameWidth,
-    //                                     "height", G_TYPE_INT, FrameHeight,
-    //                                     "framerate", GST_TYPE_FRACTION, 25, 1, NULL);
+        if (gpuMat.empty())
+            break;
 
-    // GstCapsFeatures *feature = gst_caps_features_new("memory:NVMM", NULL);
-    // gst_caps_set_features(caps, 0, feature);
+        gpuMat.download(cpuMat);
 
-    // /* Set capture caps on capture filter */
-    // g_object_set(capFilter, "caps", caps, NULL);
-    // gst_caps_unref(caps);
+        cv::imshow("cpuMat", cpuMat);
+        cv::waitKey(1);
 
-    // GstElement *sink = gst_element_factory_make("fakesink", nullptr);
-    // if (sink == nullptr) {
-    //     g_print("Create overlay sink failed.\n");
-    //     return -1;
-    // }
+        cudaFree(gpuMat.data);
+        idx++;
+    }
 
-    // gst_bin_add_many(GST_BIN(pipeline), source, capFilter, sink, nullptr);
-    // if (!gst_element_link_many(source, capFilter, sink, nullptr)) {
-    //     g_print("Link elememt eglstream source <-> overlay sink failed.\n");
-    //     return -1;
-    // }
-
-    // GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
-    // if (ret == GST_STATE_CHANGE_FAILURE) {
-    //     g_print("Change pipeline state to %s failed.\n", gst_element_state_get_name(GST_STATE_PLAYING));
-    //     return -1;
-    // }
-
-    // if (!eglStreamProducer->connectEGLProducer()) {
-    //     g_print("Connect EGL stream cuda producer failed.\n");
-    //     return -1;
-    // }
-
-    // // Firstly, call cuEGLStreamProducerPresentFrame to push 4 frame buffers to the EGL stream FIFO.
-    // eglStreamProducer->presentFrameBuffers(4);
-
-    // // start the cuda producer
-    // std::thread t = std::thread(producerThreadFunc);
-
-    // t.join();
-    // gst_element_set_state(pipeline, GST_STATE_NULL);
-    // gst_object_unref(pipeline);
-    // delete eglStreamProducer;
     return 0;
 }
 

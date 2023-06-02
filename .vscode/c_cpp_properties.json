@@ -5,7 +5,10 @@
             "includePath": [
                 "${workspaceFolder}/**",
                 "/usr/include/gstreamer-1.0/gst",
-                "/usr/include/glib-2.0"
+                "/usr/include/glib-2.0",
+                "/usr/include/gstreamer-1.0",
+                "/usr/local/cuda-10.2/include/",
+                "/usr/include/opencv4"
             ],
             "defines": [],
             "compilerPath": "/usr/bin/clang-8",
@@ -16,4 +19,3 @@
     ],
     "version": 4
 }
-
